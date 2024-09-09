@@ -1,134 +1,265 @@
 import torch.nn as nn
-import torch
 import torch.nn.functional as F
-from sklearn.experimental import enable_iterative_imputer
-from sklearn.impute import IterativeImputer
+from metrics import *
+
 
 
 class AutoEncoder(nn.Module):
-    def __init__(self, input_dim, feature_dim, dims, dropout_p=0.5):
+    def __init__(self, input_dim: int, feature_dim: int, dims: list, dropout_p: float = 0.5):
         super(AutoEncoder, self).__init__()
-        self.encoder = nn.Sequential()
-        for i in range(len(dims) + 1):
-            if i == 0:
-                self.encoder.add_module('Linear%d' % i, nn.Linear(input_dim, dims[i]))
-            elif i == len(dims):
-                self.encoder.add_module('Linear%d' % i, nn.Linear(dims[i - 1], feature_dim))
-            else:
-                self.encoder.add_module('Linear%d' % i, nn.Linear(dims[i - 1], dims[i]))
-            if i < len(dims):  # No batch norm or dropout after last layer
-                self.encoder.add_module('BatchNorm%d' % i, nn.BatchNorm1d(dims[i]))
-                self.encoder.add_module('Dropout%d' % i, nn.Dropout(dropout_p))
-            self.encoder.add_module('relu%d' % i, nn.ReLU())
+        self.encoder = self._build_layers(input_dim, feature_dim, dims, dropout_p)
 
-    def forward(self, x):
+    def _build_layers(self, input_dim, feature_dim, dims, dropout_p):
+        layers = []
+        dims = [input_dim] + dims + [feature_dim]
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            if i < len(dims) - 2:
+                layers.append(nn.BatchNorm1d(dims[i + 1]))
+                layers.append(nn.Dropout(dropout_p))
+            layers.append(nn.ReLU())
+        return nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.encoder(x)
 
 
 class AutoDecoder(nn.Module):
-    def __init__(self, input_dim, feature_dim, dims, dropout_p=0.5):
+    def __init__(self, input_dim: int, feature_dim: int, dims: list, dropout_p: float = 0.5):
         super(AutoDecoder, self).__init__()
-        self.decoder = nn.Sequential()
-        dims = list(reversed(dims))  # Reverse dims to construct the decoder
-        for i in range(len(dims) + 1):
-            if i == 0:
-                self.decoder.add_module('Linear%d' % i, nn.Linear(feature_dim, dims[i]))
-            elif i == len(dims):
-                self.decoder.add_module('Linear%d' % i, nn.Linear(dims[i - 1], input_dim))
-            else:
-                self.decoder.add_module('Linear%d' % i, nn.Linear(dims[i - 1], dims[i]))
-            if i < len(dims):  # Avoid applying batch norm or dropout to the output layer
-                self.decoder.add_module('BatchNorm%d' % i, nn.BatchNorm1d(dims[i]))
-                self.decoder.add_module('Dropout%d' % i, nn.Dropout(dropout_p))
-            self.decoder.add_module('relu%d' % i, nn.ReLU())
+        self.decoder = self._build_layers(feature_dim, input_dim, list(reversed(dims)), dropout_p)
 
-    def forward(self, x):
+    def _build_layers(self, input_dim, feature_dim, dims, dropout_p):
+        layers = []
+        dims = [input_dim] + dims + [feature_dim]
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            if i < len(dims) - 2:
+                layers.append(nn.BatchNorm1d(dims[i + 1]))
+                layers.append(nn.Dropout(dropout_p))
+            layers.append(nn.ReLU())
+        return nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.decoder(x)
 
 
+def knn_indices_cosine(matrix, j, k):
+    # Calculate cosine similarity between sample j and all other samples
+    sample_j = matrix[j].unsqueeze(0)  # Add batch dimension
+    cosine_similarities = torch.nn.functional.cosine_similarity(sample_j, matrix, dim=1)
 
-# cross-view feature融合
+    # Convert cosine similarity to cosine distance (1 - cosine similarity)
+    # cosine_distances = 1 - cosine_similarities
+
+    # Sort the distances and get indices of the K nearest neighbors
+    knn_cosine_similarities, knn_indices = torch.topk(cosine_similarities, k, largest=True)
+
+    return knn_cosine_similarities, knn_indices
+
+
+def compute_similarity(A, B, mask_A, mask_B):
+    # A: features[vi]
+    # B: features[vj]
+    # mask_A: mask for view A
+    # mask_B: mask for view B
+
+    bool_mask_A = mask_A > 0
+    bool_mask_B = mask_B > 0
+
+    # Get overlapping indices
+    overlap_idx = torch.nonzero(bool_mask_A & bool_mask_B).squeeze()
+
+    # Get A-unique indices
+    A_unique_idx = torch.nonzero(bool_mask_A & ~bool_mask_B).squeeze()
+
+    # Get B-unique indices
+    B_unique_idx = torch.nonzero(~bool_mask_A & bool_mask_B).squeeze()
+
+    # Handle the case when there's only one overlapping sample
+    if overlap_idx.dim() == 0:
+        overlap_idx = overlap_idx.unsqueeze(0)
+
+    A_overlap = A[overlap_idx] if overlap_idx.numel() > 0 else torch.empty(0, A.size(1))
+    B_overlap = B[overlap_idx] if overlap_idx.numel() > 0 else torch.empty(0, B.size(1))
+
+    if A_overlap.size(0) > 0 and B_overlap.size(0) > 0:
+        sim_matrix_overlap = (torch.mm(A_overlap, B_overlap.T) / 1).sum() / (2 * overlap_idx.size(0))
+    else:
+        sim_matrix_overlap = torch.tensor(0.0)
+
+    # Handle unique samples
+    if A_unique_idx.numel() == 0 or B_unique_idx.numel() == 0:
+        sim_matrix_unique = torch.tensor(0.0)
+        A_unique = torch.empty(0, A.size(1))
+        B_unique = torch.empty(0, B.size(1))
+    else:
+        A_unique = A[A_unique_idx]
+        B_unique = B[B_unique_idx]
+        if A_unique.dim() == 1:
+            A_unique = A_unique.unsqueeze(0)
+        if B_unique.dim() == 1:
+            B_unique = B_unique.unsqueeze(0)
+        sim_matrix_unique = (torch.mm(A_unique, B_unique.T) / 1).sum() / (A_unique.size(0) + B_unique.size(0))
+
+    # Combine the similarity measures
+    combined_size = A_unique.size(0) + B_unique.size(0) + A_overlap.size(0)
+    if combined_size > 0:
+        combined_similarity = (sim_matrix_overlap * A_overlap.size(0) + sim_matrix_unique * (
+                A_unique.size(0) + B_unique.size(0))) / combined_size
+    else:
+        combined_similarity = torch.tensor(0.0)
+
+    return combined_similarity.item()
+
+
 class CVCLNetwork(nn.Module):
-    def __init__(self, num_views, input_sizes, dims, dim_high_feature, dim_low_feature, num_clusters):
+    def __init__(self, num_views: int, input_sizes: list, dims: list, dim_high_feature: int, dim_low_feature: int,
+                 num_clusters: int, batch_size: int):
         super(CVCLNetwork, self).__init__()
+        self.encoders = nn.ModuleList(
+            [AutoEncoder(input_sizes[idx], dim_high_feature, dims) for idx in range(num_views)])
+        self.decoders = nn.ModuleList(
+            [AutoDecoder(input_sizes[idx], dim_high_feature, dims) for idx in range(num_views)])
+        self.encode_features = [nn.Parameter(torch.zeros(batch_size, dim_high_feature)) for _ in range(num_views)]
 
-        self.encoders = list()
-        self.decoders = list()
-        self.encode_features = [nn.Parameter(torch.zeros(35, dim_high_feature)) for _ in range(num_views)]
-
-        for idx in range(num_views):
-            self.encoders.append(AutoEncoder(input_sizes[idx], dim_high_feature, dims))
-            self.decoders.append(AutoDecoder(input_sizes[idx], dim_high_feature, dims))
-
-        self.encoders = nn.ModuleList(self.encoders)
-        self.decoders = nn.ModuleList(self.decoders)
         self.label_learning_module = nn.Sequential(
             nn.Linear(dim_high_feature, dim_low_feature),
             nn.Linear(dim_low_feature, num_clusters),
             nn.Softmax(dim=1)
         )
 
-    # 计算特征的平均值作为融合策略
-    # def fuse_features(self, encoded_features):
-    #     fused_features = torch.mean(torch.stack(encoded_features), dim=0)
-    #     return fused_features
-
-
-    def forward(self, data_views, missing_info):
-        global high_features, label_probs
-        lbps = list()
-        dvs = list()
-        features = list()
+    def forward(self, data_views: list, missing_info: torch.Tensor, phase_code: bool):
+        lbps = []
+        dvs = []
+        features = []
+        data_views_new = data_views
 
         num_views = len(data_views)
-        # print(data_views[0].shape)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # # 获取所有视图的encoding特征
-        # encoded_features = [self.encoders[idx](data_views[idx].to(device).float()) for idx in range(num_views)]
-
-        # 使用融合方法融合特征
-        # fused_features = self.fuse_features(encoded_features)
-
-        # 计算每个视图的预测概率并存储
-        # for encoded_feature in encoded_features:
-        #     label_probs = self.label_learning_module(encoded_feature)
-        #     lbps.append(label_probs)
-
-        # 根据预测概率计算权重（使用最大预测概率的平均值）
-        # weights = [torch.max(lbp, dim=1)[0].mean() for lbp in lbps]
-        # total_weight = sum(weights)
-        # normalized_weights = [weight / total_weight for weight in weights]
-        # # 使用计算得到的权重对特征进行加权融合
-        # fused_features = torch.zeros_like(encoded_features[0])
-        # for weight, feature in zip(normalized_weights, encoded_features):
-        #     fused_features += weight * feature
-
+        # Feature extraction and reconstruction
         for idx in range(num_views):
-            valid_idx = (missing_info[:, idx] == 0)
-            print(valid_idx)
             data_view = data_views[idx].to(device).float()
             high_features = self.encoders[idx](data_view)
-
-            if valid_idx.any():
-                # 选择不missing的特征进行标签预测概率计算
-                valid_encoded_feature = high_features[valid_idx]
-                label_probs = self.label_learning_module(valid_encoded_feature)
-                # 为了保持lbps列表的维度一致性，创建一个与完整batch大小相同的填充Tensor
-                padded_probs = torch.zeros(data_view.size(0), label_probs.size(1), device=device)
-                padded_probs[valid_idx] = label_probs
-                lbps.append(padded_probs)
-
-
-            # label_probs = self.label_learning_module(high_features)
-            # print(high_features.shape)
-
-            # unified_probs = self.label_learning_module(high_features)
-            # 使用融合后的特征进行decode
             data_view_recon = self.decoders[idx](high_features)
-            dvs.append(data_view_recon)
+            dvs.append(data_view_recon.clone())
+            features.append(high_features.clone())
 
-            features.append(high_features)
-            lbps.append(label_probs)
+        dvs_new = dvs
 
-        return lbps, dvs, high_features, features
+        # Missing-feature imputation and inference
+        if phase_code:
+            mutual_info_graph = torch.zeros(num_views, num_views)
+            for vi in range(num_views):
+                for vj in range(num_views):
+                    #if vi != vj:
+                    mutual_info_graph[vi, vj] = compute_similarity(features[vi], features[vj], 1-missing_info[:, vi], 1-missing_info[:, vj])
+                    # if vi != vj:
+                    #     overlap_idx_true = (missing_info[:, vi] == 0) & (missing_info[:, vj] == 0)
+                    #     overlap_idx = torch.nonzero(overlap_idx_true).squeeze(dim=-1)
+                    #     if overlap_idx.size() == 1:
+                    #         overlap_idx = overlap_idx.unsqueeze(0)
+                    #     mutual_info_graph[vi, vj] = compute_similarity(features[vi], features[vj], overlap_idx)
+                        #mutual_info_graph[vi, vj] = -instance_contrastive_Loss(features[vi][overlap_idx],
+            # Normalize each row by its corresponding diagonal element
+            for vi in range(num_views):
+                dia = mutual_info_graph[vi, vi]
+                if dia != 0:  # Ensure no division by zero
+                    mutual_info_graph[vi, :] = mutual_info_graph[vi, :] / dia
+                mutual_info_graph[vi, vi] = 0
+
+            #print(mutual_info_graph)
+            missing_info_imputing = missing_info
+
+            for vi in range(num_views):
+                missing_idx = torch.nonzero(missing_info_imputing[:, vi] == 1).squeeze()
+                if missing_idx.dim() != 0:
+                    for j in missing_idx:
+                        view_existing_idx = (missing_info_imputing[j, :] == 0)
+                        graph_idx = mutual_info_graph[vi].to(device)
+                        view_existing_idx = view_existing_idx.to(device)
+                        max_idx = torch.argmax(torch.mul(graph_idx.clone(), view_existing_idx.clone()))
+                        max_view_weight = graph_idx[max_idx]
+                        k=20
+                        cosine_similarities, knn_indices = knn_indices_cosine(features[max_idx].clone().detach(), j, k)
+                        cosine_similarities = torch.clamp(cosine_similarities, min=0)
+                        missing_set = set(missing_idx.tolist())
+                        knn_set = set(knn_indices.tolist())
+                        unique_knn_indices = knn_set - missing_set
+                        unique_knn_indices_tensor = torch.tensor(list(unique_knn_indices))
+                        if len(unique_knn_indices_tensor) > 0:
+                            indices_in_knn_set = [list(knn_set).index(idx) for idx in unique_knn_indices]
+                            knn_cosine_similarities = cosine_similarities[indices_in_knn_set]
+                            knn_features = features[vi][unique_knn_indices_tensor].clone()
+                            weighted_knn_features = knn_features * knn_cosine_similarities.unsqueeze(1)
+                            features[vi][j] = max_view_weight * torch.sum(weighted_knn_features, dim=0) / torch.sum(
+                                knn_cosine_similarities)
+
+                            knn_input = data_views_new[vi][unique_knn_indices_tensor].clone()
+                            weighted_knn_input = knn_input * knn_cosine_similarities.unsqueeze(1)
+                            data_views_new[vi] = data_views_new[vi].clone()
+                            data_views_new[vi][j] = max_view_weight * torch.sum(weighted_knn_input, dim=0) / torch.sum(
+                                knn_cosine_similarities)
+
+                            knn_out = dvs[vi][unique_knn_indices_tensor].clone()
+                            weighted_knn_out = knn_out * knn_cosine_similarities.unsqueeze(1)
+                            dvs_new[vi][j] = max_view_weight * torch.sum(weighted_knn_out, dim=0) / torch.sum(knn_cosine_similarities)
+
+                label_probs = self.label_learning_module(features[vi].clone())
+                lbps.append(label_probs)
+
+        fused_features = torch.mean(torch.stack(features), dim=0)
+        #fused_probs = self.label_learning_module(fused_features.clone())
+
+        new_features = []
+        input_feature_loss = 0
+        output_feature_loss = 0
+        for idx in range(num_views):
+            data_view_new = data_views_new[idx].to(device).float()
+            high_features_new = self.encoders[idx](data_view_new)
+            new_features.append(high_features_new.clone())
+            input_feature_loss += F.mse_loss(high_features_new, features[idx])
+
+            data_view_recon_new = self.decoders[idx](features[idx])
+            output_feature_loss += F.mse_loss(data_view_recon_new, dvs_new[idx])
+
+        return lbps, dvs, fused_features, features, input_feature_loss, output_feature_loss
+
+
+
+
+    # No imputation
+    # def forward(self, data_views: list, missing_info: torch.Tensor, phase_code: bool):
+    #     lbps = []
+    #     dvs = []
+    #     features = []
+    #     data_views_new = data_views
+    #
+    #     num_views = len(data_views)
+    #     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    #
+    #     # Feature extraction and reconstruction
+    #     for idx in range(num_views):
+    #         data_view = data_views[idx].to(device).float()
+    #         high_features = self.encoders[idx](data_view)
+    #         data_view_recon = self.decoders[idx](high_features)
+    #         dvs.append(data_view_recon.clone())
+    #         features.append(high_features.clone())
+    #
+    #         fused_features = torch.mean(torch.stack(features), dim=0)
+    #         fused_probs = self.label_learning_module(fused_features.clone())
+    #         label_probs = self.label_learning_module(features[idx].clone())
+    #         lbps.append(label_probs)
+    #         new_features = []
+    #         input_feature_loss = 0
+    #         output_feature_loss = 0
+    #         for idx in range(num_views):
+    #             data_view_new = data_views_new[idx].to(device).float()
+    #             high_features_new = self.encoders[idx](data_view_new)
+    #             new_features.append(high_features_new.clone())
+    #
+    #
+    #     return lbps, dvs, fused_probs, features, input_feature_loss, output_feature_loss
+
+

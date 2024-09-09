@@ -18,7 +18,7 @@ class MultiviewData(Dataset):
         self.data_views = list()
         self.device = device  # 存储device
 
-        if db == "MSRCv1_missing_0.1":
+        if db == "MSRCv1":
             mat = sio.loadmat(os.path.join(path, 'MSRCv1_missing_0.1.mat'))
             X_data = mat['X']
             self.num_views = X_data.shape[1]
@@ -33,22 +33,24 @@ class MultiviewData(Dataset):
 
 
         elif db == "MNIST-USPS":
-            mat = sio.loadmat(os.path.join(path, 'MNIST_USPS.mat'))
+            mat = sio.loadmat(os.path.join(path, 'MNIST_USPS_missing_0.1.mat'))
             X1 = mat['X1'].astype(np.float32)
             X2 = mat['X2'].astype(np.float32)
             self.data_views.append(X1.reshape(X1.shape[0], -1))
             self.data_views.append(X2.reshape(X2.shape[0], -1))
             self.num_views = len(self.data_views)
             self.labels = np.array(np.squeeze(mat['Y'])).astype(np.int32)
+            self.missing_matrix = torch.tensor(mat['missing_matrix'], dtype=torch.float32).to(self.device)
 
         elif db == "BDGP":
-            mat = sio.loadmat(os.path.join(path, 'BDGP.mat'))
+            mat = sio.loadmat(os.path.join(path, 'BDGP_missing_0.1.mat'))
             X1 = mat['X1'].astype(np.float32)
             X2 = mat['X2'].astype(np.float32)
             self.data_views.append(X1)
             self.data_views.append(X2)
             self.num_views = len(self.data_views)
             self.labels = np.array(np.squeeze(mat['Y'])).astype(np.int32)
+            self.missing_matrix = torch.tensor(mat['missing_matrix'], dtype=torch.float32).to(self.device)
 
         elif db == "Fashion":
             mat = sio.loadmat(os.path.join(path, 'Fashion.mat'))
@@ -74,7 +76,7 @@ class MultiviewData(Dataset):
             self.labels = np.array(np.squeeze(mat['Y'])).astype(np.int32)
 
         elif db == "hand":
-            mat = sio.loadmat(os.path.join(path, 'handwritten.mat'))
+            mat = sio.loadmat(os.path.join(path, 'handwritten_missing_0.1.mat'))
             X_data = mat['X']
             self.num_views = X_data.shape[1]
             for idx in range(self.num_views):
@@ -83,9 +85,10 @@ class MultiviewData(Dataset):
             for idx in range(self.num_views):
                 self.data_views[idx] = scaler.fit_transform(self.data_views[idx])
             self.labels = np.array(np.squeeze(mat['Y']) + 1).astype(np.int32)
+            self.missing_matrix = torch.tensor(mat['missing_matrix'], dtype=torch.float32).to(self.device)
 
         elif db == "scene":
-            mat = sio.loadmat(os.path.join(path, 'Scene15.mat'))
+            mat = sio.loadmat(os.path.join(path, 'Scene15_missing_0.1.mat'))
             X_data = mat['X']
             self.num_views = X_data.shape[1]
             for idx in range(self.num_views):
@@ -94,10 +97,11 @@ class MultiviewData(Dataset):
             for idx in range(self.num_views):
                 self.data_views[idx] = scaler.fit_transform(self.data_views[idx])
             self.labels = np.array(np.squeeze(mat['Y'])).astype(np.int32)
+            self.missing_matrix = torch.tensor(mat['missing_matrix'], dtype=torch.float32).to(self.device)
 
-        elif db == "100leaves":
-            mat = sio.loadmat(os.path.join(path, '100leaves.mat'))
-            X_data = mat['data']
+        elif db == "mfeat":
+            mat = sio.loadmat(os.path.join(path, 'mfeatRnSp_missing_0.1'))
+            X_data = mat['X']
             self.num_views = X_data.shape[1]
             for idx in range(self.num_views):
                 view_data = X_data[0, idx]
@@ -106,7 +110,8 @@ class MultiviewData(Dataset):
             scaler = MinMaxScaler()
             for idx in range(self.num_views):
                 self.data_views[idx] = scaler.fit_transform(self.data_views[idx])
-            self.labels = np.array(np.squeeze(mat['truth'])).astype(np.int32)
+            self.labels = np.array(np.squeeze(mat['Y'])).astype(np.int32)
+            self.missing_matrix = torch.tensor(mat['missing_matrix'], dtype=torch.float32).to(self.device)
 
 
         else:
