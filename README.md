@@ -34,6 +34,7 @@ Or fully trained models:
 bash--load_full_model True
 Model Architecture
 The framework consists of several key components:
+![Framework](https://github.com/user-attachments/assets/261b5dd8-e837-42dc-b125-11bbc0fdb83a)
 
 Encoders/Decoders: View-specific neural networks for feature extraction
 Missing Data Imputation: KNN-based mechanism for handling missing features
