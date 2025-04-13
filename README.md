@@ -3,6 +3,8 @@ Overview
 This repository implements MICA (Deep Incomplete Multi-View Clustering via Multi-Level Imputation and Contrastive Alignment), a novel approach for clustering with incomplete multi-view data. The framework combines sophisticated multi-level imputation mechanisms with contrastive learning to effectively handle missing data while discovering meaningful clusters across views.
 Features
 
+![Framework](https://github.com/user-attachments/assets/261b5dd8-e837-42dc-b125-11bbc0fdb83a)
+
 Multi-view support: Works with various types of multi-view datasets
 Missing data handling: Robust mechanism for imputing missing features
 Contrastive learning: Leverages contrastive loss for better feature representation
@@ -34,7 +36,6 @@ Or fully trained models:
 bash--load_full_model True
 Model Architecture
 The framework consists of several key components:
-![Framework](https://github.com/user-attachments/assets/261b5dd8-e837-42dc-b125-11bbc0fdb83a)
 
 Encoders/Decoders: View-specific neural networks for feature extraction
 Missing Data Imputation: KNN-based mechanism for handling missing features
